@@ -9,30 +9,70 @@ def discover_chroma_backends() -> Dict[str, Dict[str, str]]:
     current_dir = Path(".")
     
     # Look for ChromaDB directories
-    # TODO: Create list of directories that match specific criteria (directory type and name pattern)
+    chroma_dir = set()
+    curr = current_dir.resolve()
+    for path in curr.rglob("*.sqlite*"):
+        if path.is_dir() and "chroma" in path.name.lower():
+            chroma_dir.add(path)
+    # Create list of directories that match specific criteria (directory type and name pattern)
+    data_root = curr / "data"
+    if data_root.exists() and data_root.is_dir():
+        for mission in ("apollo13", "apollo11", "challenger"):
+            mission_dir = data_root / mission
+            if not (mission_dir.exists() and mission_dir.is_dir()):
+                continue
+            for path in mission_dir.rglob("*.sqlite*"):
+                if path.is_file():
+                    chroma_dir.add(path.parent)
 
-    # TODO: Loop through each discovered directory
-        # TODO: Wrap connection attempt in try-except block for error handling
-        
-            # TODO: Initialize database client with directory path and configuration settings
-            
-            # TODO: Retrieve list of available collections from the database
-            
-            # TODO: Loop through each collection found
-                # TODO: Create unique identifier key combining directory and collection names
-                # TODO: Build information dictionary containing:
-                    # TODO: Store directory path as string
-                    # TODO: Store collection name
-                    # TODO: Create user-friendly display name
-                    # TODO: Get document count with fallback for unsupported operations
-                # TODO: Add collection information to backends dictionary
-        
-        # TODO: Handle connection or access errors gracefully
-            # TODO: Create fallback entry for inaccessible directories
-            # TODO: Include error information in display name with truncation
-            # TODO: Set appropriate fallback values for missing information
+    # Loop through each discovered directory
+    for chroma_path in chroma_dir:
+        path = str(chroma_path.relative_to(curr))
+        # Wrap connection attempt in try-except block for error handling
+        try:
+            # Initialize database client with directory path and configuration settings
+            client = chromadb.PersistentClient(
+                path=str(chroma_path),
+                settings=Settings(
+                    anonymized_telemetry=False,
+                    allow_reset=True,
+                )
+            )
+            # Retrieve list of available collections from the database
+            collections = client.list_collections() or []
 
-    # TODO: Return complete backends dictionary with all discovered collections
+            # Loop through each collection found
+            for collection in collections:
+                # Create unique identifier key combining directory and collection names
+                name = getattr(collection, "name", str(collection))
+                key = f"{path}::{name}"
+                # Build information dictionary
+                count = ""
+                try:
+                    count = str(client.get_collection(name=name).count())
+                except:
+                    count = "?"
+                backends[key] = {
+                    "path": path,
+                    "collection": name,
+                    "display_name": f"{path} / {name} ({count} docs)"
+                    "count": count
+                }
+        except Exception as e:
+            # Handle connection or access errors gracefully
+                # Create fallback entry for inaccessible directories
+                # Include error information in display name with truncation
+                # Set appropriate fallback values for missing information
+            key = f"{path}::(error)"
+            backends[key] = {
+                "path": path,
+                "collection": "",
+                "display_name": f"{path} (error: {str(e)})"
+                "count": "0"
+            }
+
+    # Return complete backends dictionary with all discovered collections
+    return backends
 
 def initialize_rag_system(chroma_dir: str, collection_name: str):
     """Initialize the RAG system with specified backend (cached for performance)"""
