@@ -1,8 +1,9 @@
 from typing import Dict, List
 from openai import OpenAI
 
-def generate_response(openai_key: str, user_message: str, context: str, 
-                     conversation_history: List[Dict], model: str = "gpt-3.5-turbo") -> str:
+
+def generate_response(openai_key: str, user_message: str, context: str,
+                      conversation_history: List[Dict], model: str = "gpt-3.5-turbo") -> str:
     """Generate response using OpenAI with context"""
 
     # Define system prompt
@@ -25,9 +26,9 @@ CONTEXT:
     )
     # Add chat history
     conversation_history.append({
-            "role": "user",
-            "content": user_message
-        })
+        "role": "user",
+        "content": user_message
+    })
     # Create OpenAI Client
     try:
         openai_client = OpenAI(
@@ -36,10 +37,10 @@ CONTEXT:
         )
         # Send request to OpenAI
         response = openai_client.chat.completions.create(
-                model=model,
-                messages=conversation_history,
-                temperature=0,
-                max_completion_tokens=200,
+            model=model,
+            messages=conversation_history,
+            temperature=0,
+            max_completion_tokens=200,
         )
         print(response)
         return response.choices[0].message.content

@@ -3,11 +3,12 @@ from chromadb.config import Settings
 from typing import Dict, List, Optional
 from pathlib import Path
 
+
 def discover_chroma_backends() -> Dict[str, Dict[str, str]]:
     """Discover available ChromaDB backends in the project directory"""
     backends = {}
     current_dir = Path(".")
-    
+
     # Look for ChromaDB directories
     chroma_dir = set()
     curr = current_dir.resolve()
@@ -60,9 +61,9 @@ def discover_chroma_backends() -> Dict[str, Dict[str, str]]:
                 }
         except Exception as e:
             # Handle connection or access errors gracefully
-                # Create fallback entry for inaccessible directories
-                # Include error information in display name with truncation
-                # Set appropriate fallback values for missing information
+            # Create fallback entry for inaccessible directories
+            # Include error information in display name with truncation
+            # Set appropriate fallback values for missing information
             key = f"{path}::(error)"
             backends[key] = {
                 "path": path,
@@ -74,22 +75,24 @@ def discover_chroma_backends() -> Dict[str, Dict[str, str]]:
     # Return complete backends dictionary with all discovered collections
     return backends
 
+
 def initialize_rag_system(chroma_dir: str, collection_name: str):
     """Initialize the RAG system with specified backend (cached for performance)"""
 
     # Create a chomadb persistentclient
     client = chromadb.PersistentClient(
-            path=chroma_dir,
-            settings=Settings(
-                anonymized_telemetry=False,  # Disable telemetry for privacy
-                allow_reset=True             # Allow database reset for development
-            )
+        path=chroma_dir,
+        settings=Settings(
+            anonymized_telemetry=False,  # Disable telemetry for privacy
+            allow_reset=True             # Allow database reset for development
         )
+    )
     # Return the collection with the collection_name
     return client.get_collection(name=collection_name)
 
-def retrieve_documents(collection, query: str, n_results: int = 3, 
-                      mission_filter: Optional[str] = None) -> Optional[Dict]:
+
+def retrieve_documents(collection, query: str, n_results: int = 3,
+                       mission_filter: Optional[str] = None) -> Optional[Dict]:
     """Retrieve relevant documents from ChromaDB with optional filtering"""
 
     # Initialize filter variable to None (represents no filtering)
@@ -100,7 +103,7 @@ def retrieve_documents(collection, query: str, n_results: int = 3,
         filters = mission_filer.strip().lower()
         if filters not in {"all", "*", "any"}:
             where = {"mission": filters}
-    
+
     # Execute database query
     result = collection.query(
         query_text=[query],
@@ -111,11 +114,12 @@ def retrieve_documents(collection, query: str, n_results: int = 3,
     # Return query results to caller
     return result
 
+
 def format_context(documents: List[str], metadatas: List[Dict]) -> str:
     """Format retrieved documents into context"""
     if not documents:
         return ""
-    
+
     # Initialize list with header text for context section
     context = ["# CONTEXT \n"]
 
@@ -126,8 +130,9 @@ def format_context(documents: List[str], metadatas: List[Dict]) -> str:
         mission = str(meta.get("mission", "unknown"))
         # Clean up mission name formatting (replace underscores, capitalize)
         mission = mission.replace("_", " ").strip().title()
-        # Extract source information from metadata with fallback value  
-        source = str(meta.get("source", meta.get("file", meta.get("filename", "unknown"))))
+        # Extract source information from metadata with fallback value
+        source = str(meta.get("source", meta.get(
+            "file", meta.get("filename", "unknown"))))
         # Extract category information from metadata with fallback value
         category = str(meta.get("category", "none"))
         # Clean up category name formatting (replace underscores, capitalize)
@@ -136,7 +141,7 @@ def format_context(documents: List[str], metadatas: List[Dict]) -> str:
         header = f"[{i}] Mission: {mission} | Category: {category} | Source: {source}"
         # Add source header to context parts list
         context.append(header)
-        
+
         # Check document length and truncate if necessary
         max_chars = 1200
         doc_text = doc.strip() if isinstance(str, doc) else str(doc)
