@@ -13,6 +13,11 @@ Supported data sources:
 - Challenger transcribed audio data (text files only)
 """
 
+# Fix sqlite error
+import sys
+import pysqlite3
+sys.modules["sqlite3"] = pysqlite3
+
 import os
 import json
 import logging

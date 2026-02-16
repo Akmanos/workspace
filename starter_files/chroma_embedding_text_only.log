@@ -1,0 +1,25 @@
+2026-02-16 01:10:35,551 - INFO - Initializing ChromaDB Embedding Pipeline...
+2026-02-16 01:10:36,152 - INFO - Created new collection: nasa_space_missions_text
+2026-02-16 01:10:36,152 - INFO - Starting text data processing with update mode: skip
+2026-02-16 01:10:36,153 - INFO - Total text files to process: 0
+2026-02-16 01:10:36,153 - INFO - Files by mission:
+2026-02-16 01:10:36,153 - INFO - ============================================================
+2026-02-16 01:10:36,153 - INFO - PROCESSING COMPLETE
+2026-02-16 01:10:36,153 - INFO - ============================================================
+2026-02-16 01:10:36,153 - INFO - Files processed: 0
+2026-02-16 01:10:36,153 - INFO - Total chunks created: 0
+2026-02-16 01:10:36,153 - INFO - Documents added to collection: 0
+2026-02-16 01:10:36,153 - INFO - Documents updated in collection: 0
+2026-02-16 01:10:36,153 - INFO - Documents skipped (already exist): 0
+2026-02-16 01:10:36,153 - INFO - Errors: 0
+2026-02-16 01:10:36,153 - INFO - Processing time: 0.00 seconds
+2026-02-16 01:10:36,153 - INFO - 
+Mission breakdown:
+2026-02-16 01:10:36,155 - INFO - 
+Collection: nasa_space_missions_text
+2026-02-16 01:10:36,156 - INFO - Total documents in collection: 0
+2026-02-16 01:10:36,156 - INFO - Pipeline completed successfully!
+2026-02-16 01:12:44,432 - INFO - Initializing ChromaDB Embedding Pipeline...
+2026-02-16 01:12:44,675 - INFO - Successfuly Loaded collection: nasa_space_missions_text
+2026-02-16 01:12:44,675 - INFO - Collection Statistics:
+2026-02-16 01:12:44,678 - INFO - error: No documents in collection
