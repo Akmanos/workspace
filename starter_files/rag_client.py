@@ -2,6 +2,8 @@ import chromadb
 from chromadb.config import Settings
 from typing import Dict, List, Optional
 from pathlib import Path
+import os
+from openai import OpenAI
 
 
 def discover_chroma_backends() -> Dict[str, Dict[str, str]]:
@@ -43,7 +45,7 @@ def discover_chroma_backends() -> Dict[str, Dict[str, str]]:
                 settings=Settings(
                     anonymized_telemetry=False,
                     allow_reset=True,
-                )
+                ),
             )
             # Retrieve list of available collections from the database
             collections = client.list_collections() or []
@@ -60,10 +62,10 @@ def discover_chroma_backends() -> Dict[str, Dict[str, str]]:
                 except:
                     count = "?"
                 backends[key] = {
-                    "path": path,
-                    "collection": name,
-                    "display_name": f"{path} / {name} ({count} docs)"
-                    "count": count
+                    "directory": path,
+                    "collection_name": name,
+                    "display_name": f"{path} / {name} ({count} docs)",
+                    "count": count,
                 }
         except Exception as e:
             # Handle connection or access errors gracefully
@@ -72,10 +74,10 @@ def discover_chroma_backends() -> Dict[str, Dict[str, str]]:
             # Set appropriate fallback values for missing information
             key = f"{path}::(error)"
             backends[key] = {
-                "path": path,
-                "collection": "",
-                "display_name": f"{path} (error: {str(e)})"
-                "count": "0"
+                "directory": path,
+                "collection_name": "",
+                "display_name": f"{path} (error: {str(e)})",
+                "count": "0",
             }
 
     # Return complete backends dictionary with all discovered collections
@@ -90,8 +92,8 @@ def initialize_rag_system(chroma_dir: str, collection_name: str):
             path=chroma_dir,
             settings=Settings(
                 anonymized_telemetry=False,  # Disable telemetry for privacy
-                allow_reset=True             # Allow database reset for development
-            )
+                allow_reset=True,  # Allow database reset for development
+            ),
         )
         # Return the collection with the collection_name
         collection = client.get_collection(name=collection_name)
@@ -100,27 +102,50 @@ def initialize_rag_system(chroma_dir: str, collection_name: str):
         return None, False, str(e)
 
 
-def retrieve_documents(collection, query: str, n_results: int = 3,
-                       mission_filter: Optional[str] = None) -> Optional[Dict]:
+def retrieve_documents(
+    collection, query: str, n_results: int = 3, mission_filter: Optional[str] = None
+) -> Optional[Dict]:
     """Retrieve relevant documents from ChromaDB with optional filtering"""
+    if not query or not query.strip():
+        return {"documents": [[]], "metadatas": [[]], "distances": [[]]}
 
     # Initialize filter variable to None (represents no filtering)
     where = None
 
     # Check if filter parameter exists and is not set to "all" or equivalent
     if mission_filter:
-        filters = mission_filer.strip().lower()
+        filters = mission_filter.strip().lower()
         if filters not in {"all", "*", "any"}:
             where = {"mission": filters}
 
-    # Execute database query
-    result = collection.query(
-        query_text=[query],
-        n_results=n_results,
-        where=where
+    openai_key = os.getenv("OPENAI_API_KEY", "")
+    client = OpenAI(base_url="https://openai.vocareum.com/v1", api_key=openai_key)
+
+    # Prefer the embedding model used during indexing if it's stored on the collection
+    embedding_model = "text-embedding-3-small"
+    try:
+        meta = getattr(collection, "metadata", None) or {}
+        embedding_model = meta.get("embedding_model", embedding_model)
+    except Exception:
+        pass
+
+    emb = (
+        client.embeddings.create(
+            model=embedding_model,
+            input=query,
+        )
+        .data[0]
+        .embedding
     )
 
-    # Return query results to caller
+    # Execute database query
+    result = collection.query(
+        query_embeddings=[emb],
+        n_results=n_results,
+        where=where,
+        include=["documents", "metadatas", "distances"],
+    )
+
     return result
 
 
@@ -140,12 +165,12 @@ def format_context(documents: List[str], metadatas: List[Dict]) -> str:
         # Clean up mission name formatting (replace underscores, capitalize)
         mission = mission.replace("_", " ").strip().title()
         # Extract source information from metadata with fallback value
-        source = str(meta.get("source", meta.get(
-            "file", meta.get("filename", "unknown"))))
+        source = str(
+            meta.get("source", meta.get("file", meta.get("filename", "unknown")))
+        )
         # Extract category information from metadata with fallback value
         category = str(
-            meta.get("document_category", meta.get(
-                "category", "uncategorized"))
+            meta.get("document_category", meta.get("category", "uncategorized"))
         )
         # Clean up category name formatting (replace underscores, capitalize)
         category = category.replace("_", " ").strip().title()
@@ -156,9 +181,9 @@ def format_context(documents: List[str], metadatas: List[Dict]) -> str:
 
         # Check document length and truncate if necessary
         max_chars = 1200
-        doc_text = doc.strip() if isinstance(str, doc) else str(doc)
+        doc_text = doc.strip() if isinstance(doc, str) else str(doc)
         if len(doc_text) > max_chars:
-            doc_text = doc_text[: max_chars-3] + "..."
+            doc_text = doc_text[: max_chars - 3] + "..."
         # Add truncated or full document content to context parts list
         context.append(doc_text)
         context.append("")

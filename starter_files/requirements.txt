@@ -1,0 +1,8 @@
+chromadb
+openai
+langchain-openai
+ragas==0.4.3
+streamlit
+pandas
+tqdm
+pysqlite3-binary

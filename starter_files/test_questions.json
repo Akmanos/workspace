@@ -1,0 +1,26 @@
+[
+    {
+        "question": "What was the primary objective of the Apollo 13 mission?",
+        "reference": "The primary objective of Apollo 13 was to land on the Moon and conduct lunar exploration, but the mission was aborted after an in-flight emergency."
+    },
+    {
+        "question": "What emergency did Apollo 13 encounter during the mission?",
+        "reference": "An oxygen tank explosion in the service module caused loss of electrical power and prompted the crew to abort the lunar landing."
+    },
+    {
+        "question": "Who were the crew members of Apollo 13?",
+        "reference": "The crew consisted of Commander James A. Lovell Jr., Command Module Pilot John L. Swigert Jr., and Lunar Module Pilot Fred W. Haise Jr."
+    },
+    {
+        "question": "Which technical subsystem failed on Apollo 13 leading to the accident?",
+        "reference": "The service module's oxygen tank in the electrical power system failed, resulting in an explosion that crippled the spacecraft."
+    },
+    {
+        "question": "At what point in the mission timeline did the Apollo 13 accident occur?",
+        "reference": "The accident occurred about 56 hours into the mission during the Trans-Earth Coast phase after separation from the Moon, shortly after performing the third mid-course correction."
+    },
+    {
+        "question": "How did the crew and Mission Control respond to the disaster aboard Apollo 13?",
+        "reference": "The crew powered down the command module, used the lunar module as a lifeboat, conserved consumables, and developed improvised solutions to return safely to Earth."
+    }
+]
