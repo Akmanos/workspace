@@ -1,9 +1,55 @@
 import chromadb
 from chromadb.config import Settings
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple, Any
 from pathlib import Path
 import os
 from openai import OpenAI
+import hashlib
+
+def _dedupe_and_optionally_sort(
+    documents: List[str],
+    metadatas: List[Dict[str, Any]],
+    distances: Optional[List[float]] = None,
+) -> Tuple[List[str], List[Dict[str, Any]]]:
+    """
+    Lightweight de-dupe (and optional sort) for retrieved chunks.
+
+    - De-dupe key preference:
+        1) source + chunk_index (stable, cheap)
+        2) fallback: normalized text hash (cheap)
+    - If distances provided, keep best (lowest distance) first.
+    """
+    triples: List[Tuple[str, Dict[str, Any], Optional[float]]] = []
+    for idx, (doc, meta) in enumerate(zip(documents, metadatas)):
+        d = distances[idx] if distances and idx < len(distances) else None
+        triples.append((doc, meta or {}, d))
+
+    if distances:
+        triples.sort(key=lambda t: float("inf") if t[2] is None else t[2])
+
+    seen = set()
+    out_docs: List[str] = []
+    out_metas: List[Dict[str, Any]] = []
+
+    for doc, meta, _dist in triples:
+        source = str(meta.get("source") or meta.get("file_path") or meta.get("file") or meta.get("filename") or "unknown")
+        chunk_index = meta.get("chunk_index")
+
+        if chunk_index is not None:
+            key = f"{source}::{chunk_index}"
+        else:
+            text = doc if isinstance(doc, str) else str(doc)
+            normalized = " ".join(text.split())[:400]
+            key = hashlib.md5(normalized.encode("utf-8")).hexdigest()
+
+        if key in seen:
+            continue
+        seen.add(key)
+
+        out_docs.append(doc)
+        out_metas.append(meta)
+
+    return out_docs, out_metas
 
 
 def discover_chroma_backends() -> Dict[str, Dict[str, str]]:
@@ -146,6 +192,24 @@ def retrieve_documents(
         include=["documents", "metadatas", "distances"],
     )
 
+    try:
+        docs = (result.get("documents") or [[]])[0] or []
+        metas = (result.get("metadatas") or [[]])[0] or []
+        dists = (result.get("distances") or [[]])[0] or None
+
+        deduped_docs, deduped_metas = _dedupe_and_optionally_sort(docs, metas, dists)
+
+        result["documents"] = [deduped_docs]
+        result["metadatas"] = [deduped_metas]
+
+        if dists is not None:
+            # distances correspond to the sorted/deduped order; rebuild distances aligned to output
+            # easiest: re-run helper to return kept indices, but simplest low-risk option:
+            # just drop distances to avoid mismatch downstream.
+            result.pop("distances", None)
+    except Exception:
+        # If anything goes wrong, keep original result (never break retrieval)
+        pass
     return result
 
 
