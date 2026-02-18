@@ -1,5 +1,5 @@
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Tuple
 import json
 from pathlib import Path
 import os
@@ -27,42 +27,72 @@ try:
 except ImportError:
     RAGAS_AVAILABLE = False
 
-_REFERENCE_CACHE: Dict[str, str] = {}
+# Configuration constants
+EVALUATOR_LLM_MODEL = "gpt-3.5-turbo"
+EVALUATOR_EMBEDDINGS_MODEL = "text-embedding-3-small"
+OPENAI_BASE_URL = "https://openai.vocareum.com/v1"
+DEFAULT_CHROMA_DIR = "./chroma_db_openai"
+DEFAULT_COLLECTION_NAME = "nasa_space_missions_text"
+
+# Module-level cached instances (created once per module load)
+_REFERENCE_CACHE: Dict[str, Dict[str, Any]] = {}
+_CACHED_EVALUATOR_LLM: Optional[LangchainLLMWrapper] = None
+_CACHED_EVALUATOR_EMBEDDINGS: Optional[LangchainEmbeddingsWrapper] = None
 
 
-def _load_reference_dataset(path: str = "test_questions.json") -> Dict[str, str]:
-    """
-    Load evaluation dataset containing reference answers.
+def _get_evaluator_instances() -> Tuple[LangchainLLMWrapper, LangchainEmbeddingsWrapper]:
+    """Get or create cached evaluator LLM and embeddings instances."""
+    global _CACHED_EVALUATOR_LLM, _CACHED_EVALUATOR_EMBEDDINGS
+    
+    if _CACHED_EVALUATOR_LLM is None:
+        _CACHED_EVALUATOR_LLM = LangchainLLMWrapper(
+            ChatOpenAI(
+                model=EVALUATOR_LLM_MODEL,
+                temperature=0,
+                base_url=OPENAI_BASE_URL,
+            )
+        )
+    
+    if _CACHED_EVALUATOR_EMBEDDINGS is None:
+        _CACHED_EVALUATOR_EMBEDDINGS = LangchainEmbeddingsWrapper(
+            OpenAIEmbeddings(
+                model=EVALUATOR_EMBEDDINGS_MODEL,
+                base_url=OPENAI_BASE_URL,
+            )
+        )
+    
+    return _CACHED_EVALUATOR_LLM, _CACHED_EVALUATOR_EMBEDDINGS
 
-    Expected format:
-    [
-        {
-            "question": "...",
-            "reference": "..."
-        }
+
+def _filter_metrics(
+    has_reference: bool, has_reference_contexts: bool
+) -> List[Any]:
+    """Determine which metrics to run based on available reference data."""
+    evaluator_llm, evaluator_embeddings = _get_evaluator_instances()
+    
+    metrics = [
+        BleuScore(),
+        RougeScore(),
+        NonLLMContextPrecisionWithReference(),
+        ResponseRelevancy(llm=evaluator_llm, embeddings=evaluator_embeddings),
+        Faithfulness(llm=evaluator_llm),
+        ContextRelevance(llm=evaluator_llm),
     ]
-    """
-    global _REFERENCE_CACHE
-
-    dataset_path = Path(path)
-
-    if not dataset_path.exists():
-        return {}
-
-    try:
-        with open(dataset_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-
-        # Map question -> reference
-        _REFERENCE_CACHE = {
-            item["question"].strip(): item["reference"]
-            for item in data
-            if "question" in item and "reference" in item
-        }
-
-        return _REFERENCE_CACHE
-    except Exception:
-        return {}
+    
+    # Remove metrics that require reference answer if not available
+    if not has_reference:
+        metrics = [
+            metric for metric in metrics
+            if not isinstance(metric, (BleuScore, RougeScore, NonLLMContextPrecisionWithReference))
+        ]
+    
+    # Remove metric that specifically requires reference contexts if not available
+    if not has_reference_contexts:
+        metrics = [
+            metric for metric in metrics
+            if not isinstance(metric, NonLLMContextPrecisionWithReference)
+        ]
+    return metrics
 
 
 def evaluate_response_quality(
@@ -72,41 +102,18 @@ def evaluate_response_quality(
     if not RAGAS_AVAILABLE:
         return {"error": "RAGAS not available"}
     try:
-        # Create evaluator LLM with model gpt-3.5-turbo
-        evaluator_llm = LangchainLLMWrapper(
-            ChatOpenAI(
-                model="gpt-3.5-turbo",
-                temperature=0,
-                base_url="https://openai.vocareum.com/v1",
-            )
-        )
+        evaluator_llm, evaluator_embeddings = _get_evaluator_instances()
 
-        # Create evaluator_embeddings with model test-embedding-3-small
-        evaluator_embeddings = LangchainEmbeddingsWrapper(
-            OpenAIEmbeddings(
-                model="text-embedding-3-small",
-                base_url="https://openai.vocareum.com/v1",
-            )
-        )
+        # Get reference data for this question (cached)
+        ref_entry = _REFERENCE_CACHE.get(question.strip()) or {}
+        reference_answer = ref_entry.get("reference")
+        reference_contexts = ref_entry.get("reference_contexts")
+        has_reference_contexts = isinstance(reference_contexts, list) and len(reference_contexts) > 0
 
-        # Define an instance for each metric to evaluate
-        metrics = [
-            BleuScore(),
-            RougeScore(),
-            # This metric requires a ground-truth reference answer in the sample.
-            # chat.py does not provide a reference, so we conditionally remove it below.
-            NonLLMContextPrecisionWithReference(),
-            ResponseRelevancy(llm=evaluator_llm, embeddings=evaluator_embeddings),
-            Faithfulness(llm=evaluator_llm),
-            ContextRelevance(llm=evaluator_llm),
-        ]
+        # Determine which metrics to use based on available references
+        metrics = _filter_metrics(bool(reference_answer), has_reference_contexts)
 
-        # Attempt to load references once (cached)
-        if not _REFERENCE_CACHE:
-            _load_reference_dataset()
-        reference_answer = _REFERENCE_CACHE.get(question.strip())
-
-        # Evaluate the response using the metrics
+        # Build sample data
         sample_kwargs = {
             "question": question,
             "user_input": question,  # keep for compatibility
@@ -116,30 +123,18 @@ def evaluate_response_quality(
 
         if reference_answer:
             sample_kwargs["reference"] = reference_answer
-        else:
-            # No reference available: remove metrics that require it
-            metrics = [
-                m
-                for m in metrics
-                if not isinstance(
-                    m, (NonLLMContextPrecisionWithReference, BleuScore, RougeScore)
-                )
-            ]
+        if has_reference_contexts:
+            sample_kwargs["reference_contexts"] = reference_contexts
 
-        # sample = SingleTurnSample(**sample_kwargs)
-        # dataset_obj = EvaluationDataset.from_list([sample])
+        # Evaluate
         dataset_obj = EvaluationDataset.from_list([sample_kwargs])
+        result = evaluate(dataset=dataset_obj, metrics=metrics)
 
-        result = evaluate(
-            dataset=dataset_obj,
-            metrics=metrics,
-        )
-
-        # Return the evaluation results
+        # Extract numeric results
         df = result.to_pandas()
         row = df.iloc[0]
 
-        # Return ONLY metrics that were run
+        # Return only computed metric scores (exclude metadata columns)
         drop_cols = {
             "question",
             "user_input",
@@ -190,19 +185,27 @@ def run_batch_evaluation(
     with open(path, "r", encoding="utf-8") as f:
         data = json.load(f)
 
-    # Cache references for reference-based metrics (if present)
+    # Cache references for reference-based metrics (load from questions file)
     global _REFERENCE_CACHE
     _REFERENCE_CACHE = {}
     for item in data:
-        q = (item.get("question") or "").strip()
-        r = item.get("reference")
-        if q and isinstance(r, str) and r.strip():
-            _REFERENCE_CACHE[q] = r.strip()
+        question = (item.get("question") or "").strip()
+        reference = item.get("reference")
+        reference_contexts = item.get("reference_contexts")
+        
+        if not question or not isinstance(reference, str) or not reference.strip():
+            continue
+        
+        entry: Dict[str, Any] = {"reference": reference.strip()}
+        if isinstance(reference_contexts, list) and all(isinstance(x, str) for x in reference_contexts):
+            entry["reference_contexts"] = [x.strip() for x in reference_contexts if x.strip()]
+        
+        _REFERENCE_CACHE[question] = entry
 
-    # Init RAG
-    collection, ok, err = rag_client.initialize_rag_system(chroma_dir, collection_name)
-    if not ok:
-        raise RuntimeError(f"Failed to init RAG system: {err}")
+    # Initialize RAG system
+    collection, success, error = rag_client.initialize_rag_system(chroma_dir, collection_name)
+    if not success:
+        raise RuntimeError(f"Failed to init RAG system: {error}")
 
     per_metric_values: Dict[str, List[float]] = {}
     per_q_results: List[Dict[str, Any]] = []
@@ -281,11 +284,11 @@ def main():
     )
     parser.add_argument("--openai-key", required=True, help="OpenAI API key")
     parser.add_argument(
-        "--chroma-dir", default="./chroma_db_openai", help="ChromaDB persist directory"
+        "--chroma-dir", default=DEFAULT_CHROMA_DIR, help="ChromaDB persist directory"
     )
     parser.add_argument(
         "--collection-name",
-        default="nasa_space_missions_text",
+        default=DEFAULT_COLLECTION_NAME,
         help="ChromaDB collection name",
     )
     parser.add_argument(
