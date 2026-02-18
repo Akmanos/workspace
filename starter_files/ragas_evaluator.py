@@ -35,15 +35,81 @@ DEFAULT_CHROMA_DIR = "./chroma_db_openai"
 DEFAULT_COLLECTION_NAME = "nasa_space_missions_text"
 
 # Module-level cached instances (created once per module load)
-_REFERENCE_CACHE: Dict[str, Dict[str, Any]] = {}
 _CACHED_EVALUATOR_LLM: Optional[LangchainLLMWrapper] = None
 _CACHED_EVALUATOR_EMBEDDINGS: Optional[LangchainEmbeddingsWrapper] = None
+# Add near your constants
+DEFAULT_TEST_QUESTIONS_PATH = "test_questions.json"
+REFERENCE_DATA_ENV = "RAGAS_REFERENCE_DATA_PATH"
+
+# Replace _REFERENCE_CACHE type to store both reference + reference_contexts
+_REFERENCE_CACHE: Dict[str, Dict[str, Any]] = {}
+_REFERENCE_CACHE_LOADED: bool = False
 
 
-def _get_evaluator_instances() -> Tuple[LangchainLLMWrapper, LangchainEmbeddingsWrapper]:
+def _get_reference_dataset_path() -> str:
+    """Allow override via env var; otherwise default to rubric file name."""
+    return os.getenv(REFERENCE_DATA_ENV, DEFAULT_TEST_QUESTIONS_PATH)
+
+
+def _ensure_reference_cache_loaded() -> None:
+    """
+    Lazy-load reference data once per process.
+
+    Safe to call from both chat and batch flows:
+    - If already loaded, does nothing.
+    - If file missing/unreadable, marks loaded and leaves cache empty.
+    """
+    global _REFERENCE_CACHE, _REFERENCE_CACHE_LOADED
+
+    if _REFERENCE_CACHE_LOADED:
+        return
+
+    _REFERENCE_CACHE_LOADED = True  # mark first to avoid repeated attempts
+    dataset_path = Path(_get_reference_dataset_path())
+    if not dataset_path.exists():
+        return
+
+    try:
+        with open(dataset_path, "r", encoding="utf-8") as f:
+            rows = json.load(f)
+
+        cache: Dict[str, Dict[str, Any]] = {}
+        for row in rows if isinstance(rows, list) else []:
+            question_text = (row.get("question") or "").strip()
+            reference_text = row.get("reference")
+            reference_contexts = row.get("reference_contexts")
+
+            if not question_text:
+                continue
+
+            entry: Dict[str, Any] = {}
+            if isinstance(reference_text, str) and reference_text.strip():
+                entry["reference"] = reference_text.strip()
+
+            if isinstance(reference_contexts, list):
+                cleaned_contexts = [
+                    c.strip()
+                    for c in reference_contexts
+                    if isinstance(c, str) and c.strip()
+                ]
+                if cleaned_contexts:
+                    entry["reference_contexts"] = cleaned_contexts
+
+            if entry:
+                cache[question_text] = entry
+
+        _REFERENCE_CACHE = cache
+    except Exception:
+        # Keep cache empty; evaluation should still work for non-reference metrics.
+        _REFERENCE_CACHE = {}
+
+
+def _get_evaluator_instances() -> (
+    Tuple[LangchainLLMWrapper, LangchainEmbeddingsWrapper]
+):
     """Get or create cached evaluator LLM and embeddings instances."""
     global _CACHED_EVALUATOR_LLM, _CACHED_EVALUATOR_EMBEDDINGS
-    
+
     if _CACHED_EVALUATOR_LLM is None:
         _CACHED_EVALUATOR_LLM = LangchainLLMWrapper(
             ChatOpenAI(
@@ -52,7 +118,7 @@ def _get_evaluator_instances() -> Tuple[LangchainLLMWrapper, LangchainEmbeddings
                 base_url=OPENAI_BASE_URL,
             )
         )
-    
+
     if _CACHED_EVALUATOR_EMBEDDINGS is None:
         _CACHED_EVALUATOR_EMBEDDINGS = LangchainEmbeddingsWrapper(
             OpenAIEmbeddings(
@@ -60,17 +126,19 @@ def _get_evaluator_instances() -> Tuple[LangchainLLMWrapper, LangchainEmbeddings
                 base_url=OPENAI_BASE_URL,
             )
         )
-    
+
     return _CACHED_EVALUATOR_LLM, _CACHED_EVALUATOR_EMBEDDINGS
 
 
-def _filter_metrics(
-    has_reference: bool, has_reference_contexts: bool
+def _select_metrics(
+    has_reference_answer: bool,
+    has_reference_contexts: bool,
 ) -> List[Any]:
-    """Determine which metrics to run based on available reference data."""
+    """Return only metrics that can run with the available columns."""
     evaluator_llm, evaluator_embeddings = _get_evaluator_instances()
-    
-    metrics = [
+
+    # Start with the superset your rubric wants to "support"
+    candidate_metrics: List[Any] = [
         BleuScore(),
         RougeScore(),
         NonLLMContextPrecisionWithReference(),
@@ -78,21 +146,22 @@ def _filter_metrics(
         Faithfulness(llm=evaluator_llm),
         ContextRelevance(llm=evaluator_llm),
     ]
-    
-    # Remove metrics that require reference answer if not available
-    if not has_reference:
-        metrics = [
-            metric for metric in metrics
-            if not isinstance(metric, (BleuScore, RougeScore, NonLLMContextPrecisionWithReference))
+
+    # BLEU/ROUGE need a "reference" answer
+    if not has_reference_answer:
+        candidate_metrics = [
+            m for m in candidate_metrics if not isinstance(m, (BleuScore, RougeScore))
         ]
-    
-    # Remove metric that specifically requires reference contexts if not available
+
+    # NonLLMContextPrecisionWithReference needs reference_contexts (per your error)
     if not has_reference_contexts:
-        metrics = [
-            metric for metric in metrics
-            if not isinstance(metric, NonLLMContextPrecisionWithReference)
+        candidate_metrics = [
+            m
+            for m in candidate_metrics
+            if not isinstance(m, NonLLMContextPrecisionWithReference)
         ]
-    return metrics
+
+    return candidate_metrics
 
 
 def evaluate_response_quality(
@@ -101,57 +170,73 @@ def evaluate_response_quality(
     """Evaluate response quality using RAGAS metrics"""
     if not RAGAS_AVAILABLE:
         return {"error": "RAGAS not available"}
+
     try:
-        evaluator_llm, evaluator_embeddings = _get_evaluator_instances()
+        # Ensure reference data is available if the rubric file exists
+        _ensure_reference_cache_loaded()
 
-        # Get reference data for this question (cached)
-        ref_entry = _REFERENCE_CACHE.get(question.strip()) or {}
-        reference_answer = ref_entry.get("reference")
-        reference_contexts = ref_entry.get("reference_contexts")
-        has_reference_contexts = isinstance(reference_contexts, list) and len(reference_contexts) > 0
+        normalized_question = (question or "").strip()
+        reference_entry = _REFERENCE_CACHE.get(normalized_question, {})
 
-        # Determine which metrics to use based on available references
-        metrics = _filter_metrics(bool(reference_answer), has_reference_contexts)
+        reference_answer_text = reference_entry.get("reference")
+        reference_contexts_list = reference_entry.get("reference_contexts")
 
-        # Build sample data
-        sample_kwargs = {
-            "question": question,
-            "user_input": question,  # keep for compatibility
+        has_reference_answer = isinstance(reference_answer_text, str) and bool(
+            reference_answer_text.strip()
+        )
+        has_reference_contexts = isinstance(reference_contexts_list, list) and any(
+            isinstance(x, str) and x.strip() for x in reference_contexts_list
+        )
+
+        metrics = _select_metrics(
+            has_reference_answer=has_reference_answer,
+            has_reference_contexts=has_reference_contexts,
+        )
+
+        sample_kwargs: Dict[str, Any] = {
+            "question": normalized_question,
+            "user_input": normalized_question,  # keep for compatibility
             "response": answer,
             "retrieved_contexts": contexts or [],
         }
 
-        if reference_answer:
-            sample_kwargs["reference"] = reference_answer
-        if has_reference_contexts:
-            sample_kwargs["reference_contexts"] = reference_contexts
+        if has_reference_answer:
+            sample_kwargs["reference"] = reference_answer_text.strip()
 
-        # Evaluate
+        if has_reference_contexts:
+            sample_kwargs["reference_contexts"] = [
+                x.strip()
+                for x in reference_contexts_list
+                if isinstance(x, str) and x.strip()
+            ]
+
         dataset_obj = EvaluationDataset.from_list([sample_kwargs])
         result = evaluate(dataset=dataset_obj, metrics=metrics)
 
-        # Extract numeric results
         df = result.to_pandas()
         row = df.iloc[0]
 
-        # Return only computed metric scores (exclude metadata columns)
+        # Return ONLY metrics that were run
         drop_cols = {
             "question",
             "user_input",
             "response",
             "retrieved_contexts",
             "reference",
+            "reference_contexts",
         }
-        out: Dict[str, float] = {}
-        for k, v in row.items():
-            if k in drop_cols:
+
+        scores_out: Dict[str, float] = {}
+        for col_name, value in row.items():
+            if col_name in drop_cols:
                 continue
             try:
-                out[k] = float(v)
+                scores_out[col_name] = float(value)
             except Exception:
                 pass
 
-        return out
+        return scores_out
+
     except Exception as e:
         return {"error": f"Evaluation failed: {e}"}
 
@@ -186,24 +271,41 @@ def run_batch_evaluation(
         data = json.load(f)
 
     # Cache references for reference-based metrics (load from questions file)
-    global _REFERENCE_CACHE
+    global _REFERENCE_CACHE, _REFERENCE_CACHE_LOADED
     _REFERENCE_CACHE = {}
+
     for item in data:
-        question = (item.get("question") or "").strip()
-        reference = item.get("reference")
+        question_text = (item.get("question") or "").strip()
+        reference_answer = item.get("reference")
         reference_contexts = item.get("reference_contexts")
-        
-        if not question or not isinstance(reference, str) or not reference.strip():
+
+        if not question_text:
             continue
-        
-        entry: Dict[str, Any] = {"reference": reference.strip()}
-        if isinstance(reference_contexts, list) and all(isinstance(x, str) for x in reference_contexts):
-            entry["reference_contexts"] = [x.strip() for x in reference_contexts if x.strip()]
-        
-        _REFERENCE_CACHE[question] = entry
+
+        entry: Dict[str, Any] = {}
+
+        if isinstance(reference_answer, str) and reference_answer.strip():
+            entry["reference"] = reference_answer.strip()
+
+        if isinstance(reference_contexts, list):
+            cleaned_reference_contexts = [
+                c.strip()
+                for c in reference_contexts
+                if isinstance(c, str) and c.strip()
+            ]
+            if cleaned_reference_contexts:
+                entry["reference_contexts"] = cleaned_reference_contexts
+
+        if entry:
+            _REFERENCE_CACHE[question_text] = entry
+
+    # Prevent evaluate_response_quality() from re-loading and overwriting this cache.
+    _REFERENCE_CACHE_LOADED = True
 
     # Initialize RAG system
-    collection, success, error = rag_client.initialize_rag_system(chroma_dir, collection_name)
+    collection, success, error = rag_client.initialize_rag_system(
+        chroma_dir, collection_name
+    )
     if not success:
         raise RuntimeError(f"Failed to init RAG system: {error}")
 
